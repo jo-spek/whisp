@@ -338,6 +338,22 @@ def g_soy_song_2020_prep():
     )
 
 
+# Pasture 2020 global
+def g_gpw_pasture_2020_prep():
+    # Load the pasture model for 2020
+    collection = ee.ImageCollection(
+        "projects/global-pasture-watch/assets/ggc-30m/v1/grassland_c"
+    )
+    
+    # Filter the collection for the year 2020 and create a binary mask
+    pasture_2020 = (
+        collection.filterDate("2020-01-01", "2020-12-31")
+        .mosaic()
+        .gt(0)  # Values 1 and 2 from dataset as positive for pastures.
+    )
+    return pasture_2020.rename("GPW_Pasture_2020")
+
+
 ##############
 # ESRI 2023
 
