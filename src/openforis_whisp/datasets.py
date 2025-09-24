@@ -344,7 +344,7 @@ def g_gpw_pasture_2020_prep():
     collection = ee.ImageCollection(
         "projects/global-pasture-watch/assets/ggc-30m/v1/grassland_c"
     )
-    
+
     # Filter the collection for the year 2020 and create a binary mask
     pasture_2020 = (
         collection.filterDate("2020-01-01", "2020-12-31")
