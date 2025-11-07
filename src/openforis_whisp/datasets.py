@@ -353,6 +353,21 @@ def g_gpw_pasture_2020_prep():
     )
     return pasture_2020.rename("GPW_Pasture_2020")
 
+  
+ # Load the Global Forest Change dataset
+    gfc = ee.Image("UMD/hansen/global_forest_change_2024_v1_12")
+    img_stack = None
+    # Generate an image based on GFC with one band of forest tree loss per year from 2001 to 2022
+    for i in range(1, 24 + 1):
+        gfc_loss_year = (
+            gfc.select(["lossyear"]).eq(i).And(gfc.select(["treecover2000"]).gt(10))
+        )
+        gfc_loss_year = gfc_loss_year.rename("GFC_loss_year_" + str(2000 + i))
+        if img_stack is None:
+            img_stack = gfc_loss_year
+        else:
+            img_stack = img_stack.addBands(gfc_loss_year)
+    return img_stack
 
 ##############
 # ESRI 2023
@@ -1165,6 +1180,8 @@ def nco_ideam_eufo_commission_2020_prep():
     ideam_agroforest = ideam_agroforest_raw.eq(4)  # get forest class
     return ideam_agroforest.rename("nCO_ideam_eufo_commission_2020").selfMask()
 
+###################################################################
+# nCI - Côte d'Ivoire
 
 # Cocoa_bnetd
 def nci_ocs2020_prep():
@@ -1214,6 +1231,19 @@ def g_water_mask_prep():
 
     water_mask_image = ee.Image("projects/ee-andyarnellgee/assets/water_mask_jrc_usgs")
     return water_mask_image.selfMask().rename(water_flag)
+
+###################################################################
+# nKE - Kenya
+
+# Land Use Land Cover 2018 Kenya
+def nke_lulc2018_prep():
+    # Load the Kenyan LULC map for 2018
+    lulc_ke =  ee.Image("users/giusdesan/kenya_landcover")
+    # Select 2018 layer
+    b3 = lulc_ke.select("band_2018")
+    # Mask for crop classes (class 6 = perennial cropland, class 7 = annual cropland)
+    mask = b3.eq(6).Or(b3.eq(7))
+    return mask.rename("nKE_LULC_KFS_2018")
 
 
 ###Combining datasets
