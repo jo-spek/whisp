@@ -7,10 +7,69 @@ and thresholds, raising informative errors when constraints are violated.
 
 import json
 from pathlib import Path
-from shapely.geometry import Polygon as ShapelyPolygon
+from shapely.geometry import Polygon as ShapelyPolygon, shape as shapely_shape
 
 # Note: area summary stats are estimations for use in deciding pathways for analysis
 # (estimation preferred here as allows efficient processing speed and limits overhead of checking file)
+
+
+def _convert_projected_area_to_ha(area_sq_units: float, crs: str = None) -> float:
+    """
+    Convert area from projected CRS units to hectares.
+
+    Most projected CRS use meters as units, so:
+    - area_sq_units is in square meters
+    - 1 hectare = 10,000 m²
+
+    Args:
+        area_sq_units: Area in square units of the projection (typically square meters)
+        crs: CRS string for reference (e.g., 'EPSG:3857'). Used for validation.
+
+    Returns:
+        Area in hectares
+    """
+    # Standard conversion: 1 hectare = 10,000 m²
+    # Most projected CRS use meters, so this works universally
+    return area_sq_units / 10000
+
+
+def _estimate_area_from_bounds(coords, area_conversion_factor: float) -> float:
+    """
+    Estimate area from bounding box when actual area calculation fails.
+    Extracts bounding box and calculates its area as a fallback estimate.
+    Returns area in hectares.
+    """
+    try:
+        # Flatten all coordinates to find bounds
+        all_coords = []
+
+        def flatten_coords(c):
+            if isinstance(c[0], (list, tuple)) and isinstance(c[0][0], (list, tuple)):
+                for sub in c:
+                    flatten_coords(sub)
+            else:
+                all_coords.extend(c)
+
+        flatten_coords(coords)
+        if not all_coords:
+            return 0
+
+        # Extract lon/lat values
+        lons = [c[0] for c in all_coords]
+        lats = [c[1] for c in all_coords]
+
+        min_lon, max_lon = min(lons), max(lons)
+        min_lat, max_lat = min(lats), max(lats)
+
+        # Bounding box area
+        bbox_area = (max_lon - min_lon) * (max_lat - min_lat)
+
+        # Apply conversion factor
+        return abs(bbox_area) * area_conversion_factor
+    except:
+        return 0
+
+
 def analyze_geojson(
     geojson_data: Path | str | dict,
     metrics=[
@@ -76,6 +135,8 @@ def analyze_geojson(
         - 'vertex_percentiles': {'p25': int, 'p50': int, 'p75': int, 'p90': int}
     """
     results = {}
+    crs_warning = None
+    file_path = None
 
     try:
         # Load GeoJSON from file if path provided
@@ -83,10 +144,44 @@ def analyze_geojson(
             file_path = Path(geojson_data)
             if not file_path.exists():
                 raise FileNotFoundError(f"GeoJSON file not found: {file_path}")
-            with open(file_path, "r") as f:
-                geojson_data = json.load(f)
+
+            # Try UTF-8 first (most common), then fall back to auto-detection
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    geojson_data = json.load(f)
+            except UnicodeDecodeError:
+                # Auto-detect encoding if UTF-8 fails
+                try:
+                    import chardet
+
+                    with open(file_path, "rb") as f:
+                        raw_data = f.read()
+                        detected = chardet.detect(raw_data)
+                        encoding = detected.get("encoding", "latin-1")
+
+                    with open(file_path, "r", encoding=encoding, errors="replace") as f:
+                        geojson_data = json.load(f)
+                except Exception:
+                    # Final fallback: use latin-1 which accepts all byte values
+                    with open(file_path, "r", encoding="latin-1") as f:
+                        geojson_data = json.load(f)
+
+            # Detect CRS from file if available
+            try:
+                import geopandas as gpd
+
+                gdf = gpd.read_file(file_path)
+                if gdf.crs and gdf.crs != "EPSG:4326":
+                    crs_warning = f"⚠️  CRS is {gdf.crs}, not EPSG:4326. Area metrics will be inaccurate. Data will be auto-reprojected during processing."
+            except Exception:
+                pass  # If we can't detect CRS, continue without warning
 
         features = geojson_data.get("features", [])
+
+        # Add CRS warning to results if detected
+        if crs_warning:
+            results["crs_warning"] = crs_warning
+            print(crs_warning)
 
         if "count" in metrics:
             results["count"] = len(features)
@@ -113,6 +208,29 @@ def analyze_geojson(
             geometry_type_counts = {}
             valid_polygons = 0
 
+            # Tracking for fallback geometries
+            bbox_fallback_count = 0  # Geometries that used bounding box estimate
+            geometry_skip_count = 0  # Geometries completely skipped
+            polygon_type_stats = {}  # Track stats by geometry type
+
+            # Detect CRS to determine area conversion factor
+            area_conversion_factor = 1232100  # Default: WGS84 (degrees to ha)
+            detected_crs = None
+
+            # Try to detect CRS from file if available
+            if file_path:
+                try:
+                    import geopandas as gpd
+
+                    gdf_temp = gpd.read_file(str(file_path))
+                    detected_crs = gdf_temp.crs
+                    if detected_crs and detected_crs != "EPSG:4326":
+                        # Projected CRS typically uses meters, so convert m² to ha
+                        # 1 ha = 10,000 m²
+                        area_conversion_factor = 1 / 10000
+                except Exception:
+                    pass  # Use default if CRS detection fails
+
             for feature in features:
                 try:
                     coords = feature["geometry"]["coordinates"]
@@ -133,13 +251,27 @@ def analyze_geojson(
 
                         # Calculate area from coordinates using shapely
                         try:
-                            poly = ShapelyPolygon(coords[0])
-                            # Convert square degrees to hectares (near equator)
-                            # 1 degree latitude ≈ 111 km, so 1 degree² ≈ 111² km² = 12,321 km² = 1,232,100 ha
-                            area_ha = abs(poly.area) * 1232100
+                            # Use shapely.geometry.shape to properly handle all geometry components
+                            geom = shapely_shape(feature["geometry"])
+                            # Convert using detected CRS
+                            area_ha = abs(geom.area) * area_conversion_factor
                             areas.append(area_ha)
-                        except:
-                            pass  # Skip if calculation fails
+                        except Exception as e:
+                            # Fallback: estimate from bounding box if geometry fails
+                            bbox_area = _estimate_area_from_bounds(
+                                coords, area_conversion_factor
+                            )
+                            if bbox_area > 0:
+                                areas.append(bbox_area)
+                                bbox_fallback_count += 1
+                                polygon_type_stats["Polygon_bbox"] = (
+                                    polygon_type_stats.get("Polygon_bbox", 0) + 1
+                                )
+                            else:
+                                geometry_skip_count += 1
+                                polygon_type_stats["Polygon_skipped"] = (
+                                    polygon_type_stats.get("Polygon_skipped", 0) + 1
+                                )
                         valid_polygons += 1
 
                     elif geom_type == "MultiPolygon":
@@ -152,12 +284,28 @@ def analyze_geojson(
 
                         # Calculate area from coordinates using shapely
                         try:
-                            for polygon in coords:
-                                poly = ShapelyPolygon(polygon[0])
-                                area_ha = abs(poly.area) * 1232100
-                                areas.append(area_ha)
-                        except:
-                            pass  # Skip if calculation fails
+                            # Use shapely.geometry.shape to properly handle MultiPolygon
+                            geom = shapely_shape(feature["geometry"])
+                            # Convert using detected CRS - use total area of all parts
+                            area_ha = abs(geom.area) * area_conversion_factor
+                            areas.append(area_ha)
+                        except Exception as e:
+                            # Fallback: estimate from bounding box if geometry fails
+                            bbox_area = _estimate_area_from_bounds(
+                                coords, area_conversion_factor
+                            )
+                            if bbox_area > 0:
+                                areas.append(bbox_area)
+                                bbox_fallback_count += 1
+                                polygon_type_stats["MultiPolygon_bbox"] = (
+                                    polygon_type_stats.get("MultiPolygon_bbox", 0) + 1
+                                )
+                            else:
+                                geometry_skip_count += 1
+                                polygon_type_stats["MultiPolygon_skipped"] = (
+                                    polygon_type_stats.get("MultiPolygon_skipped", 0)
+                                    + 1
+                                )
                         valid_polygons += 1
 
                 except:
@@ -311,6 +459,21 @@ def analyze_geojson(
                             if metric not in ["area_percentiles", "vertex_percentiles"]
                             else {"p25": 0, "p50": 0, "p75": 0, "p90": 0}
                         )
+
+        # Add geometry quality logging to results
+        if bbox_fallback_count > 0 or geometry_skip_count > 0:
+            geometry_quality_log = (
+                f"Geometry quality summary:\n"
+                f"  - Bounding box fallback used: {bbox_fallback_count} features\n"
+                f"  - Geometries skipped: {geometry_skip_count} features"
+            )
+            if polygon_type_stats:
+                geometry_quality_log += "\n  - Breakdown:"
+                for stat_type, count in sorted(polygon_type_stats.items()):
+                    geometry_quality_log += f"\n    - {stat_type}: {count}"
+
+            results["geometry_quality_note"] = geometry_quality_log
+            print(geometry_quality_log)
 
         return results
 
@@ -587,23 +750,43 @@ def validate_geojson_constraints(
     return results
 
 
-def suggest_method(polygon_count, mean_area_ha, mean_vertices=None, verbose=True):
+def suggest_processing_mode(
+    feature_count,
+    mean_area_ha=None,
+    mean_vertices=None,
+    feature_type="polygon",
+    verbose=True,
+):
     """
-    Suggest processing method based on polygon characteristics.
+    Suggest processing mode based on feature characteristics.
 
-    Decision thresholds from benchmark data (area per polygon × polygon count):
-    - Small polygons (10 ha): need 250+ polygons for concurrent
-    - Medium polygons (100 ha): breakeven at ~100 polygons
-    - Large polygons (500 ha): concurrent wins at 50+ polygons
+    Decision thresholds from comprehensive benchmark data (Nov 2025):
+
+    POINTS:
+    - Break-even: 750-1000 features
+    - Sequential faster: < 750 features
+    - Concurrent faster: >= 750 features
+
+    POLYGONS (area-based thresholds):
+    - Tiny (< 1 ha): break-even ~500 features
+    - Small (1-5 ha, simple): break-even ~500 features
+    - Small (1-5 ha, complex 20-50v): break-even ~500 features
+    - Medium (5-20 ha): break-even ~250 features
+    - Large (20-100 ha): break-even ~250 features
+    - Very large (50-200 ha): break-even ~250 features
+
+    Vertex complexity adjustment: High vertex counts (>50) favor concurrent at lower thresholds
 
     Parameters:
     -----------
-    polygon_count : int
-        Number of polygons
-    mean_area_ha : float
-        Mean area per polygon in hectares
+    feature_count : int
+        Number of features (polygons or points)
+    mean_area_ha : float, optional
+        Mean area per polygon in hectares (required for polygons, ignored for points)
     mean_vertices : float, optional
-        Mean number of vertices per polygon (can influence decision for complex geometries)
+        Mean number of vertices per polygon (influences decision for complex geometries)
+    feature_type : str
+        'polygon', 'multipolygon', or 'point' (default: 'polygon')
     verbose : bool
         Print recommendation explanation
 
@@ -612,31 +795,63 @@ def suggest_method(polygon_count, mean_area_ha, mean_vertices=None, verbose=True
     str: 'concurrent' or 'sequential'
     """
 
-    # Primary decision based on area
-    if mean_area_ha >= 300:  # Large polygons
-        breakeven = 50
-        method = "concurrent" if polygon_count >= breakeven else "sequential"
-    elif mean_area_ha >= 50:  # Medium polygons
-        breakeven = 100
-        method = "concurrent" if polygon_count >= breakeven else "sequential"
-    else:  # Small polygons
-        breakeven = 250
-        method = "concurrent" if polygon_count >= breakeven else "sequential"
+    # Points: simple threshold-based decision
+    if feature_type == "point":
+        breakeven = 750
+        method = "concurrent" if feature_count >= breakeven else "sequential"
 
-    # Optional adjustment based on vertex complexity (very high complexity favors concurrent)
-    if mean_vertices is not None and mean_vertices > 500:
-        # Reduce breakeven by 25% for very complex geometries
-        adjusted_breakeven = int(breakeven * 0.75)
-        method = "concurrent" if polygon_count >= adjusted_breakeven else "sequential"
+        if verbose:
+            print(f"\nMETHOD RECOMMENDATION (Points)")
+            print(f"   Features: {feature_count} points")
+            print(f"   Break-even: {breakeven} features | Method: {method.upper()}")
+
+        return method
+
+    # Polygons and MultiPolygons: area and complexity-based decision
+    # MultiPolygons use same breakpoints as Polygons
+    if mean_area_ha is None:
+        # Default to conservative threshold if area unknown
+        breakeven = 500
+        method = "concurrent" if feature_count >= breakeven else "sequential"
+
+        if verbose:
+            print(f"\nMETHOD RECOMMENDATION (Polygons - area unknown)")
+            print(f"   Features: {feature_count} polygons")
+            print(
+                f"   Break-even: {breakeven} (conservative) | Method: {method.upper()}"
+            )
+
+        return method
+
+    # Area-based thresholds from benchmark data
+    if mean_area_ha >= 20:  # Large to very large polygons
+        breakeven = 250
+    elif mean_area_ha >= 5:  # Medium polygons
+        breakeven = 250
+    elif mean_area_ha >= 1:  # Small polygons
+        # Vertex complexity matters more for small polygons
+        if mean_vertices is not None and mean_vertices >= 30:
+            breakeven = 500  # Complex small polygons
+        else:
+            breakeven = 500  # Simple small polygons
+    else:  # Tiny polygons (< 1 ha)
+        breakeven = 500
+
+    # Vertex complexity adjustment for high-complexity geometries
+    if mean_vertices is not None and mean_vertices >= 50:
+        # High complexity: reduce breakeven by 20% (concurrent beneficial sooner)
+        breakeven = int(breakeven * 0.8)
+
+    method = "concurrent" if feature_count >= breakeven else "sequential"
 
     if verbose:
-        print(f"\nMETHOD RECOMMENDATION")
+        print(f"\nMETHOD RECOMMENDATION (Polygons)")
         print(
-            f"   Polygons: {polygon_count} | Mean Area: {mean_area_ha:.1f} ha", end=""
+            f"   Features: {feature_count} | Mean Area: {mean_area_ha:.1f} ha", end=""
         )
         if mean_vertices is not None:
             print(f" | Mean Vertices: {mean_vertices:.1f}", end="")
         print()
-        print(f"   Breakeven: {breakeven} polygons | Method: {method.upper()}")
+        print(f"   Break-even: {breakeven} features | Method: {method.upper()}")
 
     return method

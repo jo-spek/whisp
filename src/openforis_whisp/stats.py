@@ -88,12 +88,10 @@ def get_admin_boundaries_fc():
 def whisp_formatted_stats_geojson_to_df_legacy(
     input_geojson_filepath: Path | str,
     external_id_column=None,
-    remove_geom=False,
     national_codes=None,
     unit_type="ha",
     whisp_image=None,
     custom_bands=None,  # New parameter
-    validate_geometries: bool = False,
 ) -> pd.DataFrame:
     """
         Legacy function for basic Whisp stats extraction.
@@ -135,53 +133,19 @@ def whisp_formatted_stats_geojson_to_df_legacy(
             - List of band names: ['Aa_test', 'elevation']
             - Dict with types: {'Aa_test': 'float64', 'elevation': 'float32'}
             - None: preserves all extra columns automatically
-        validate_geometries : bool, optional
-            Whether to validate and fix invalid geometries, by default False.
-            Set to True to automatically fix invalid/self-intersecting polygons.
 
     Returns
         -------
         df_stats : pd.DataFrame
             The DataFrame containing the Whisp stats for the input ROI.
     """
-    # Load GeoJSON and validate geometries if requested
-    if validate_geometries:
-        import json
-        import geopandas as gpd
-        from shapely.validation import make_valid
-        import logging as py_logging
-
-        logger = py_logging.getLogger("whisp-legacy")
-
-        # Load GeoJSON file
-        with open(input_geojson_filepath, "r") as f:
-            geojson_data = json.load(f)
-
-        # Convert to GeoDataFrame
-        gdf = gpd.GeoDataFrame.from_features(geojson_data["features"])
-
-        # Validate and fix invalid geometries
-        valid_count = gdf.geometry.is_valid.sum()
-        invalid_count = len(gdf) - valid_count
-        if invalid_count > 0:
-            logger.warning(f"Fixing {invalid_count} invalid geometries")
-            gdf["geometry"] = gdf["geometry"].apply(
-                lambda g: make_valid(g) if g and not g.is_valid else g
-            )
-
-        # Convert back to GeoJSON dict (stays in memory - no temp files!)
-        geojson_cleaned = json.loads(gdf.to_json())
-
-        # OPTIMIZATION: Pass GeoJSON dict directly - eliminates file I/O overhead
-        feature_collection = convert_geojson_to_ee(geojson_cleaned)
-    else:
-        # Original path - no validation
-        feature_collection = convert_geojson_to_ee(str(input_geojson_filepath))
+    # Convert GeoJSON to Earth Engine FeatureCollection
+    # Note: Geometry validation/cleaning should be done before calling this function
+    feature_collection = convert_geojson_to_ee(str(input_geojson_filepath))
 
     return whisp_formatted_stats_ee_to_df(
         feature_collection,
         external_id_column,
-        remove_geom,
         national_codes=national_codes,
         unit_type=unit_type,
         whisp_image=whisp_image,
@@ -200,7 +164,8 @@ def whisp_formatted_stats_geojson_to_df(
     mode: str = "sequential",
     batch_size: int = 10,
     max_concurrent: int = 20,
-    validate_geometries: bool = False,
+    geometry_audit_trail: bool = False,
+    status_file: str = None,
 ) -> pd.DataFrame:
     """
     Main entry point for converting GeoJSON to Whisp statistics.
@@ -222,11 +187,7 @@ def whisp_formatted_stats_geojson_to_df(
         The column in the GeoJSON containing external IDs to be preserved in the output DataFrame.
         This column must exist as a property in ALL features of the GeoJSON file.
         Use debug_feature_collection_properties() to inspect available properties if you encounter errors.
-    remove_geom : bool, default=False
-        If True, the geometry of the GeoJSON is removed from the output DataFrame.
     national_codes : list, optional
-        List of ISO2 country codes to include national datasets.
-    unit_type: str, optional
         Whether to use hectares ("ha") or percentage ("percent"), by default "ha".
     whisp_image : ee.Image, optional
         Pre-combined multiband Earth Engine Image containing all Whisp datasets.
@@ -248,11 +209,23 @@ def whisp_formatted_stats_geojson_to_df(
     max_concurrent : int, optional
         Maximum concurrent EE calls for concurrent mode, by default 20.
         Only applicable for "concurrent" mode.
-    validate_geometries : bool, optional
-        Whether to validate and fix invalid geometries, by default False.
-        Set to True to automatically fix invalid/self-intersecting polygons.
-        For production workflows, it's recommended to use geometry validation and
-        cleaning tools BEFORE processing with this function.
+    geometry_audit_trail : bool, default True
+        If True (default), includes audit trail columns:
+        - geo_original: Original input geometry
+        - geometry_type_original: Original geometry type
+        - geometry_type: Processed geometry type (from EE)
+        - geometry_type_changed: Boolean flag if geometry changed
+        - geometry_degradation_type: Description of how it changed
+
+        Processing metadata stored in df.attrs['processing_metadata'].
+        These columns enable full transparency for geometry modifications during processing.
+    status_file : str, optional
+        Path to JSON status file or directory for real-time progress tracking.
+        If a directory is provided, creates 'whisp_processing_status.json' in that directory.
+        Updates every 3 minutes and at progress milestones (5%, 10%, etc.).
+        Format: {"status": "processing", "progress": "450/1000", "percent": 45.0,
+                 "elapsed_sec": 120, "eta_sec": 145, "updated_at": "2025-11-13T14:23:45"}
+        Most useful for large concurrent jobs. Works in both concurrent and sequential modes.
 
     Returns
     -------
@@ -312,12 +285,10 @@ def whisp_formatted_stats_geojson_to_df(
         return whisp_formatted_stats_geojson_to_df_legacy(
             input_geojson_filepath=input_geojson_filepath,
             external_id_column=external_id_column,
-            remove_geom=remove_geom,
             national_codes=national_codes,
             unit_type=unit_type,
             whisp_image=whisp_image,
             custom_bands=custom_bands,
-            validate_geometries=validate_geometries,
         )
     elif mode in ("concurrent", "sequential"):
         # Log info if batch_size or max_concurrent are not used in sequential mode
@@ -336,7 +307,6 @@ def whisp_formatted_stats_geojson_to_df(
         return whisp_formatted_stats_geojson_to_df_fast(
             input_geojson_filepath=input_geojson_filepath,
             external_id_column=external_id_column,
-            remove_geom=remove_geom,
             national_codes=national_codes,
             unit_type=unit_type,
             whisp_image=whisp_image,
@@ -344,7 +314,8 @@ def whisp_formatted_stats_geojson_to_df(
             mode=mode,  # Pass mode directly (concurrent or sequential)
             batch_size=batch_size,
             max_concurrent=max_concurrent,
-            validate_geometries=validate_geometries,
+            geometry_audit_trail=geometry_audit_trail,
+            status_file=status_file,
         )
     else:
         raise ValueError(
@@ -503,7 +474,6 @@ def whisp_formatted_stats_ee_to_df(
 def whisp_stats_geojson_to_df(
     input_geojson_filepath: Path | str,
     external_id_column=None,
-    remove_geom=False,
     national_codes=None,
     unit_type="ha",
     whisp_image=None,  # New parameter
@@ -536,7 +506,6 @@ def whisp_stats_geojson_to_df(
     return whisp_stats_ee_to_df(
         feature_collection,
         external_id_column,
-        remove_geom,
         national_codes=national_codes,
         unit_type=unit_type,
         whisp_image=whisp_image,  # Pass through
@@ -1020,7 +989,7 @@ def whisp_stats_ee_to_drive(
         )
         task.start()
         print(
-            "Exporting to Google Drive: 'whisp_results/whisp_output_table.csv'. To track progress: https://code.earthengine.google.com/tasks"
+            "Exporting to Google Drive: 'whisp_output_table.csv'. To track progress: https://code.earthengine.google.com/tasks"
         )
     except Exception as e:
         print(f"An error occurred during the export: {e}")
