@@ -14,7 +14,7 @@ Cocoa_ETH,120,,commodities,NA,1,1,0,float32,1,0,g_eth_kalischek_cocoa_prep
 Rubber_FDaP,140,,commodities,NA,1,1,0,float32,1,0,g_fdap_rubber_prep
 Rubber_RBGE,150,,commodities,NA,1,1,0,float32,1,0,g_rbge_rubber_prep
 Soy_Song_2020,160,,commodities,NA,1,1,0,float32,1,0,g_soy_song_2020_prep
-GPW_Pasture_2020,170,,commodities,NA,1,1,0,float32,1,0,g_gpw_pasture_2020_prep
+GPW_Pasture_2020,170,,pasture,NA,1,1,0,float32,1,0,g_gpw_pasture_2020_prep
 TMF_def_2000,180,,disturbance_before,NA,0,0,0,float32,1,0,g_tmf_def_per_year_prep
 TMF_def_2001,190,,disturbance_before,NA,0,0,0,float32,1,0,g_tmf_def_per_year_prep
 TMF_def_2002,200,,disturbance_before,NA,0,0,0,float32,1,0,g_tmf_def_per_year_prep
@@ -199,4 +199,5 @@ nBR_INPE_TCcer_pasture_2020,2423,BR,commodities,NA,1,1,0,float32,1,0,nbr_terracl
 nBR_MapBiomas_col9_pasture_2020,2424,BR,commodities,NA,1,1,0,float32,1,0,nbr_mapbiomasc9_pasture_prep
 nCI_Cocoa_bnetd,3000,CI,commodities,NA,1,1,0,float32,1,0,nci_ocs2020_prep
 nKE_LULC_KFS_2018,2500,KE,commodities,NA,1,1,0,float32,1,0,nke_lulc2018_prep
+
 
