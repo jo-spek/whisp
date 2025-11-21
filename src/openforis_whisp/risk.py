@@ -140,7 +140,7 @@ def whisp_risk(
                                       If not provided, will detect from dataframe 'unit' column.
         custom_bands_info (dict, optional): Custom band risk information. Dict format:
             {
-                'band_name': {
+                'band_name': {git pull
                     'theme': 'treecover',  # or 'commodities', 'disturbance_before', 'disturbance_after'
                     'theme_timber': 'primary',  # or 'naturally_reg_2020', 'planted_plantation_2020', etc.
                     'use_for_risk': 1,  # 0 or 1
@@ -322,6 +322,7 @@ def whisp_risk(
         ind_2_name=ind_2_name,
         ind_3_name=ind_3_name,
         ind_4_name=ind_4_name,
+        ind_12_name=ind_12_name,
     )
 
     return df_w_indicators_and_risk_timber
